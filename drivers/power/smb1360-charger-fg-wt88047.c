@@ -340,6 +340,7 @@ struct smb1360_chip {
 	int				fg_thermistor_c1_coeff;
 	int				fg_cc_to_cv_mv;
 	int				fg_auto_recharge_soc;
+	bool				empty_soc_disabled;
 
 	/* status tracking */
 	int				fg_reset_threshold_mv;
@@ -1848,13 +1849,17 @@ static int min_soc_handler(struct smb1360_chip *chip, u8 rt_stat)
 
 static int empty_soc_handler(struct smb1360_chip *chip, u8 rt_stat)
 {
-	if (rt_stat) {
-		pr_warn_ratelimited("SOC is 0\n");
-		chip->empty_soc = true;
-		pm_stay_awake(chip->dev);
-	} else {
-		chip->empty_soc = false;
-		pm_relax(chip->dev);
+	pr_debug("SOC empty! rt_stat = 0x%02x\n", rt_stat);
+
+	if (!chip->empty_soc_disabled) {
+		if (rt_stat) {
+			pr_warn_ratelimited("SOC is 0\n");
+			chip->empty_soc = true;
+			pm_stay_awake(chip->dev);
+		} else {
+			chip->empty_soc = false;
+			pm_relax(chip->dev);
+		}
 	}
 
 	return 0;
@@ -3952,9 +3957,9 @@ static int smb1360_parse_jeita_params(struct smb1360_chip *chip)
 	return rc;
 }
 
+#ifdef CONFIG_BQ2022A_SUPPORT
 extern int power_supply_set_charging_enabled(struct power_supply *psy,
 													bool enabled);
-#ifdef CONFIG_BQ2022A_SUPPORT
 extern int bq2022a_get_bat_module_id(void);
 
 void smb1360_get_bat_character(struct smb1360_chip *chip)
@@ -4191,6 +4196,9 @@ static int smb_parse_dt(struct smb1360_chip *chip)
 	}
 
 	/* fg params */
+	chip->empty_soc_disabled = of_property_read_bool(node,
+						"qcom,empty-soc-disabled");
+
 	rc = of_property_read_u32(node, "qcom,fg-delta-soc", &chip->delta_soc);
 	if (rc < 0)
 		chip->delta_soc = -EINVAL;
@@ -4336,6 +4344,10 @@ static int smb1360_probe(struct i2c_client *client,
 		return rc;
 	}
 
+#ifdef CONFIG_BQ2022A_SUPPORT
+	smb1360_get_bat_character(chip);
+#endif
+
 	rc = smb1360_hw_init(chip);
 	if (rc < 0) {
 		dev_err(&client->dev,
@@ -4366,10 +4378,6 @@ static int smb1360_probe(struct i2c_client *client,
 			"Unable to register batt_psy rc = %d\n", rc);
 		goto fail_hw_init;
 	}
-
-#ifdef CONFIG_BQ2022A_SUPPORT
-	smb1360_get_bat_character(chip);
-#endif
 
 	/* STAT irq configuration */
 	if (client->irq) {
